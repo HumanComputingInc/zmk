@@ -1,0 +1,20 @@
+properties:
+  rdy-gpios:
+    type: phandle-array
+    description: "Data Ready pin for the Azoteq IQS5xx trackpad"
+  
+  reset-gpios:
+    type: phandle-array
+    description: "Reset pin for the Azoteq IQS5xx trackpad"
+
+  # x-invert:
+  #   type: boolean
+  #   description: "If true, invert reported X-axis data (e.g. to handle board rotations)"
+
+  # y-invert:
+  #   type: boolean
+  #   description: "If true, invert reported Y-axis data (e.g. to handle board rotations)"
+
+  # no-taps:
+  #   type: boolean
+  #   description: "Disable tap detection/processing if the firmware or driver supports taps."

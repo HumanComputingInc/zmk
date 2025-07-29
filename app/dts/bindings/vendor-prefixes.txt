@@ -1,2 +1,3 @@
 zmk	ZMK Project
 moergo	MoErgo
+azoteq	Azoteq (Pty) Ltd.

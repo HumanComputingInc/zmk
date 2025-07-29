@@ -1,0 +1,324 @@
+/*
+ * Copyright (c) 2024 ZMK Contributors
+ * SPDX-License-Identifier: MIT
+ */
+
+#define DT_DRV_COMPAT azoteq_iqs5xx
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/input/input.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
+
+/* Register addresses from datasheet */
+#define IQS5XX_GESTURE_EVENTS_0 0x000D
+#define IQS5XX_GESTURE_EVENTS_1 0x000E
+#define IQS5XX_NUM_FINGERS 0x0011
+#define IQS5XX_REL_X 0x0012          /* 2 bytes */
+#define IQS5XX_REL_Y 0x0014          /* 2 bytes */
+#define IQS5XX_ABS_X 0x0016          /* 2 bytes */
+#define IQS5XX_ABS_Y 0x0018          /* 2 bytes */
+#define IQS5XX_TOUCH_STRENGTH 0x001A /* 2 bytes */
+#define IQS5XX_TOUCH_AREA 0x001C
+
+#define IQS5XX_END_COMM_WINDOW 0xEEEE
+
+#define IQS5XX_SYSTEM_CONTROL_0 0x0431
+/* System Control 0 bits */
+#define IQS5XX_ACK_RESET BIT(7)
+#define IQS5XX_AUTO_ATI BIT(5)
+#define IQS5XX_ALP_RESEED BIT(4)
+#define IQS5XX_RESEED BIT(3)
+
+#define IQS5XX_SYSTEM_CONFIG_0 0x058E
+/* System Config 0 bits */
+#define IQS5XX_MANUAL_CONTROL BIT(7)
+#define IQS5XX_SETUP_COMPLETE BIT(6)
+#define IQS5XX_WDT BIT(5)
+#define IQS5XX_SW_INPUT_EVENT BIT(4)
+#define IQS5XX_ALP_REATI BIT(3)
+#define IQS5XX_REATI BIT(2)
+#define IQS5XX_SW_INPUT_SELECT BIT(1)
+#define IQS5XX_SW_INPUT BIT(0)
+
+#define IQS5XX_SYSTEM_CONFIG_1 0x058F
+/* System Config 1 bits */
+#define IQS5XX_EVENT_MODE BIT(0)
+#define IQS5XX_GESTURE_EVENT BIT(1)
+#define IQS5XX_TP_EVENT BIT(2)
+#define IQS5XX_REATI_EVENT BIT(3)
+#define IQS5XX_ALP_PROX_EVENT BIT(4)
+#define IQS5XX_SNAP_EVENT BIT(5)
+#define IQS5XX_TOUCH_EVENT BIT(6)
+#define IQS5XX_PROX_EVENT BIT(7)
+
+// Filter settings register.
+#define IQS5XX_FILTER_SETTINGS 0x0632
+// Filter settings bits.
+#define IQS5XX_IIR_FILTER BIT(0)
+#define IQS5XX_MAV_FILTER BIT(1)
+#define IQS5XX_IIR_SELECT BIT(2)
+#define IQS5XX_ALP_COUNT_FILTER BIT(3)
+
+#define IQS5XX_SYSTEM_INFO_0 0x000F
+/* System Info 0 bits */
+#define IQS5XX_SHOW_RESET BIT(7)
+#define IQS5XX_ALP_REATI_OCCURRED BIT(6)
+#define IQS5XX_ALP_ATI_ERROR BIT(5)
+#define IQS5XX_REATI_OCCURRED BIT(4)
+#define IQS5XX_ATI_ERROR BIT(3)
+
+#define IQS5XX_SYSTEM_INFO_1 0x0010
+/* System Info 1 bits */
+#define IQS5XX_SWITCH_STATE BIT(5)
+#define IQS5XX_SNAP_TOGGLE BIT(4)
+#define IQS5XX_RR_MISSED BIT(3)
+#define IQS5XX_TOO_MANY_FINGERS BIT(2)
+#define IQS5XX_PALM_DETECT BIT(1)
+#define IQS5XX_TP_MOVEMENT BIT(0)
+
+struct iqs5xx_config {
+    struct i2c_dt_spec i2c;
+    struct gpio_dt_spec rdy_gpio;
+    struct gpio_dt_spec reset_gpio;
+};
+
+struct iqs5xx_data {
+    const struct device *dev;
+    struct gpio_callback rdy_cb;
+    struct k_work work;
+    bool initialized;
+};
+
+static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t buf[2];
+    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
+    int ret;
+
+    ret = i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), buf, sizeof(buf));
+    if (ret < 0) {
+        return ret;
+    }
+
+    *val = (buf[0] << 8) | buf[1];
+    return 0;
+}
+
+static int iqs5xx_read_reg8(const struct device *dev, uint16_t reg, uint8_t *val) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
+
+    return i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), val, 1);
+}
+
+static int iqs5xx_write_reg8(const struct device *dev, uint16_t reg, uint8_t val) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t buf[3] = {reg >> 8, reg & 0xFF, val};
+
+    return i2c_write_dt(&config->i2c, buf, sizeof(buf));
+}
+
+static int iqs5xx_end_comm_window(const struct device *dev) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t buf[3] = {IQS5XX_END_COMM_WINDOW >> 8, IQS5XX_END_COMM_WINDOW & 0xFF, 0x00};
+
+    return i2c_write_dt(&config->i2c, buf, sizeof(buf));
+}
+
+static void iqs5xx_work_handler(struct k_work *work) {
+    struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
+    const struct device *dev = data->dev;
+    uint8_t sys_info_0, sys_info_1, num_fingers;
+    int16_t rel_x, rel_y;
+    int ret;
+
+    /* Read system info registers */
+    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_0, &sys_info_0);
+    if (ret < 0) {
+        LOG_ERR("Failed to read system info 0: %d", ret);
+        goto end_comm;
+    }
+
+    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_1, &sys_info_1);
+    if (ret < 0) {
+        LOG_ERR("Failed to read system info 1: %d", ret);
+        goto end_comm;
+    }
+
+    /* Handle reset indication */
+    if (sys_info_0 & IQS5XX_SHOW_RESET) {
+        LOG_INF("Device reset detected");
+        /* Acknowledge reset */
+        iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
+        goto end_comm;
+    }
+
+    /* Check for trackpad movement */
+    if (sys_info_1 & IQS5XX_TP_MOVEMENT) {
+        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
+        if (ret < 0) {
+            LOG_ERR("Failed to read number of fingers: %d", ret);
+            goto end_comm;
+        }
+
+        /* Read relative movement data */
+        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_X, (uint16_t *)&rel_x);
+        if (ret < 0) {
+            LOG_ERR("Failed to read relative X: %d", ret);
+            goto end_comm;
+        }
+
+        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_Y, (uint16_t *)&rel_y);
+        if (ret < 0) {
+            LOG_ERR("Failed to read relative Y: %d", ret);
+            goto end_comm;
+        }
+
+        /* Report movement if there's actually movement */
+        if (rel_x != 0 || rel_y != 0) {
+            LOG_DBG("Movement: fingers=%d, rel_x=%d, rel_y=%d", num_fingers, rel_x, rel_y);
+
+            /* Send pointer movement event */
+            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
+        }
+    }
+
+end_comm:
+    /* End communication window */
+    iqs5xx_end_comm_window(dev);
+}
+
+static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *cb,
+                               gpio_port_pins_t pins) {
+    struct iqs5xx_data *data = CONTAINER_OF(cb, struct iqs5xx_data, rdy_cb);
+
+    k_work_submit(&data->work);
+}
+
+static int iqs5xx_setup_device(const struct device *dev) {
+    int ret;
+
+    /* Enable event mode and trackpad events */
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1, IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure event mode: %d", ret);
+        return ret;
+    }
+
+    // Set filter settings with:
+    // - IIR filter enabled
+    // - MAV filter enabled
+    // - IIR select disabled (dynamic IIR)
+    // - ALP count filter enabled
+    ret = iqs5xx_write_reg8(dev, IQS5XX_FILTER_SETTINGS,
+                            IQS5XX_IIR_FILTER | IQS5XX_MAV_FILTER | IQS5XX_ALP_COUNT_FILTER);
+
+    /* Configure system settings */
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0, IQS5XX_SETUP_COMPLETE | IQS5XX_WDT);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure system: %d", ret);
+        return ret;
+    }
+
+    /* End communication window */
+    ret = iqs5xx_end_comm_window(dev);
+    if (ret < 0) {
+        LOG_ERR("Failed to end comm window: %d", ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+static int iqs5xx_init(const struct device *dev) {
+    const struct iqs5xx_config *config = dev->config;
+    struct iqs5xx_data *data = dev->data;
+    int ret;
+
+    if (!i2c_is_ready_dt(&config->i2c)) {
+        LOG_ERR("I2C device not ready");
+        return -ENODEV;
+    }
+
+    data->dev = dev;
+    k_work_init(&data->work, iqs5xx_work_handler);
+
+    /* Configure reset GPIO if available */
+    if (config->reset_gpio.port) {
+        if (!gpio_is_ready_dt(&config->reset_gpio)) {
+            LOG_ERR("Reset GPIO not ready");
+            return -ENODEV;
+        }
+
+        ret = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_ACTIVE);
+        if (ret < 0) {
+            LOG_ERR("Failed to configure reset GPIO: %d", ret);
+            return ret;
+        }
+
+        /* Reset the device */
+        gpio_pin_set_dt(&config->reset_gpio, 1);
+        k_msleep(1);
+        gpio_pin_set_dt(&config->reset_gpio, 0);
+        k_msleep(10);
+    }
+
+    /* Configure RDY GPIO */
+    if (!gpio_is_ready_dt(&config->rdy_gpio)) {
+        LOG_ERR("RDY GPIO not ready");
+        return -ENODEV;
+    }
+
+    ret = gpio_pin_configure_dt(&config->rdy_gpio, GPIO_INPUT);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure RDY GPIO: %d", ret);
+        return ret;
+    }
+
+    gpio_init_callback(&data->rdy_cb, iqs5xx_rdy_handler, BIT(config->rdy_gpio.pin));
+    ret = gpio_add_callback(config->rdy_gpio.port, &data->rdy_cb);
+    if (ret < 0) {
+        LOG_ERR("Failed to add RDY callback: %d", ret);
+        return ret;
+    }
+
+    ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure RDY interrupt: %d", ret);
+        return ret;
+    }
+
+    /* Wait for device to be ready */
+    k_msleep(100);
+
+    /* Setup device configuration */
+    ret = iqs5xx_setup_device(dev);
+    if (ret < 0) {
+        LOG_ERR("Failed to setup device: %d", ret);
+        return ret;
+    }
+
+    data->initialized = true;
+    LOG_INF("IQS5xx trackpad initialized");
+
+    return 0;
+}
+
+// Replace CONFIG_INPUT_INIT_PRIORITY with the azoteq specific value.
+#define IQS5XX_INIT(n)                                                                             \
+    static struct iqs5xx_data iqs5xx_data_##n;                                                     \
+    static const struct iqs5xx_config iqs5xx_config_##n = {                                        \
+        .i2c = I2C_DT_SPEC_INST_GET(n),                                                            \
+        .rdy_gpio = GPIO_DT_SPEC_INST_GET(n, rdy_gpios),                                           \
+        .reset_gpio = GPIO_DT_SPEC_INST_GET_OR(n, reset_gpios, {0}),                               \
+    };                                                                                             \
+    DEVICE_DT_INST_DEFINE(n, iqs5xx_init, NULL, &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
+                          CONFIG_INPUT_INIT_PRIORITY, NULL);
+
+DT_INST_FOREACH_STATUS_OKAY(IQS5XX_INIT)
