@@ -3,4 +3,6 @@
 
 zephyr_library_amend()
 
+zephyr_library_sources_ifdef(CONFIG_INPUT_AZOTEQ_IQS5XX iqs5xx.c)
+
 zephyr_library_sources_ifdef(CONFIG_ZMK_INPUT_MOCK input_mock.c)
