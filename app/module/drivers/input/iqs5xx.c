@@ -5,6 +5,7 @@
 
 #define DT_DRV_COMPAT azoteq_iqs5xx
 
+#include <stdlib.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -121,6 +122,9 @@ struct iqs5xx_data {
     bool initialized;
     // Flag to indicate if the button was pressed in a previous cycle.
     uint8_t buttons_pressed;
+    // Scroll accumulators.
+    int16_t scroll_x_acc;
+    int16_t scroll_y_acc;
 };
 
 static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
@@ -180,7 +184,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
     uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
-    int16_t rel_x, rel_y;
     int ret;
 
     /* Read system info registers */
@@ -216,18 +219,26 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
-    // Handle movement and gestures.
-    //
-    // Each one of these branches needs to make send the last report it makes as
-    // sync to ensure that the input subsystem process things in order.
-    if (sys_info_1 & IQS5XX_TP_MOVEMENT) {
-        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
-        if (ret < 0) {
-            LOG_ERR("Failed to read number of fingers: %d", ret);
-            goto end_comm;
-        }
+    bool tp_movement = (sys_info_1 & IQS5XX_TP_MOVEMENT) != 0;
+    bool scroll = (gesture_events_1 & IQS5XX_SCROLL) != 0;
+    if (!scroll) {
+        // Clear accumulators if we're not actively scrolling.
+        data->scroll_x_acc = 0;
+        data->scroll_y_acc = 0;
+    }
 
-        /* Read relative movement data */
+    uint16_t button_code;
+    bool button_pressed = false;
+    if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
+        button_pressed = true;
+        button_code = INPUT_BTN_0;
+    } else if (gesture_events_1 & IQS5XX_TWO_FINGER_TAP) {
+        button_pressed = true;
+        button_code = INPUT_BTN_1;
+    }
+
+    int16_t rel_x, rel_y;
+    if (tp_movement || scroll) {
         ret = iqs5xx_read_reg16(dev, IQS5XX_REL_X, (uint16_t *)&rel_x);
         if (ret < 0) {
             LOG_ERR("Failed to read relative X: %d", ret);
@@ -239,35 +250,57 @@ static void iqs5xx_work_handler(struct k_work *work) {
             LOG_ERR("Failed to read relative Y: %d", ret);
             goto end_comm;
         }
+    }
+
+    // Handle movement and gestures.
+    //
+    // Each one of these branches needs to make send the last report it makes as
+    // sync to ensure that the input subsystem process things in order.
+    if (button_pressed) {
+        // Cancel any pending release.
+        k_work_cancel_delayable(&data->button_release_work);
+
+        // Press the button immediately.
+        input_report_key(dev, button_code, 1, true, K_FOREVER);
+        data->buttons_pressed |= BIT(button_code - INPUT_BTN_0);
+
+        // Schedule release after 100ms.
+        k_work_schedule(&data->button_release_work, K_MSEC(100));
+    } else if (scroll) {
+        int16_t scroll_div = 32;
+        if (rel_x != 0) {
+            input_report_rel(dev, INPUT_REL_HWHEEL, rel_x, true, K_FOREVER);
+            goto end_comm;
+        }
+        if (rel_y != 0) {
+            // Invert scroll direcion.
+            rel_y *= -1;
+            // input_report_rel(dev, INPUT_REL_WHEEL, rel_y, true, K_FOREVER);
+            data->scroll_y_acc += rel_y;
+            if (abs(data->scroll_y_acc) >= scroll_div) {
+                input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true,
+                                 K_FOREVER);
+                data->scroll_y_acc %= scroll_div;
+            }
+            LOG_INF("New scroll y accumulator: %d", data->scroll_y_acc);
+
+            goto end_comm;
+        }
+    } else if (tp_movement) {
+        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
+        if (ret < 0) {
+            LOG_ERR("Failed to read number of fingers: %d", ret);
+            goto end_comm;
+        }
 
         /* Report movement if there's actually movement */
         if (rel_x != 0 || rel_y != 0) {
             LOG_DBG("Movement: fingers=%d, rel_x=%d, rel_y=%d", num_fingers, rel_x, rel_y);
 
             /* Send pointer movement event */
-            ret = input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
-            ret = input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
-    } else if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
-        // Cancel any pending release.
-        k_work_cancel_delayable(&data->button_release_work);
-
-        // Press the button immediately.
-        input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
-        data->buttons_pressed |= BIT(0);
-
-        // Schedule release after 100ms.
-        k_work_schedule(&data->button_release_work, K_MSEC(100));
-    } else if (gesture_events_1 & IQS5XX_TWO_FINGER_TAP) {
-        // Cancel any pending release.
-        k_work_cancel_delayable(&data->button_release_work);
-
-        // Press the button immediately.
-        input_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
-        data->buttons_pressed |= BIT(1);
-
-        // Schedule release after 100ms.
-        k_work_schedule(&data->button_release_work, K_MSEC(100));
     }
 
 end_comm:
@@ -293,7 +326,7 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, 10);
+    ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, 5);
     if (ret < 0) {
         LOG_ERR("Failed to set bottom beta: %d", ret);
         return ret;
@@ -342,7 +375,8 @@ static int iqs5xx_setup_device(const struct device *dev) {
     }
 
     // Configure multi finger gestures:
-    ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF, IQS5XX_TWO_FINGER_TAP);
+    ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF,
+                            IQS5XX_TWO_FINGER_TAP | IQS5XX_SCROLL);
     if (ret < 0) {
         LOG_ERR("Failed to configure multi finger gestures: %d", ret);
         return ret;
