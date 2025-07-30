@@ -5,6 +5,7 @@
 
 #define DT_DRV_COMPAT azoteq_iqs5xx
 
+#include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
@@ -15,8 +16,6 @@
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
 /* Register addresses from datasheet */
-#define IQS5XX_GESTURE_EVENTS_0 0x000D
-#define IQS5XX_GESTURE_EVENTS_1 0x000E
 #define IQS5XX_NUM_FINGERS 0x0011
 #define IQS5XX_REL_X 0x0012          /* 2 bytes */
 #define IQS5XX_REL_Y 0x0014          /* 2 bytes */
@@ -24,6 +23,9 @@ LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 #define IQS5XX_ABS_Y 0x0018          /* 2 bytes */
 #define IQS5XX_TOUCH_STRENGTH 0x001A /* 2 bytes */
 #define IQS5XX_TOUCH_AREA 0x001C
+
+#define IQS5XX_BOTTOM_BETA 0x0637
+#define IQS5XX_STATIONARY_THRESH 0x0672
 
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
@@ -81,6 +83,29 @@ LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 #define IQS5XX_PALM_DETECT BIT(1)
 #define IQS5XX_TP_MOVEMENT BIT(0)
 
+// These 2 registers have the same bit map.
+// The first one configures the gestures,
+// the second one reports gesture events at runtime.
+#define IQS5XX_SINGLE_FINGER_GESTURES_CONF 0x06B7
+#define IQS5XX_GESTURE_EVENTS_0 0x000D
+// Single finger gesture identifiers.
+#define IQS5XX_SINGLE_TAP BIT(0)
+#define IQS5XX_PRESS_AND_HOLD BIT(1)
+#define IQS5XX_SWIPE_LEFT BIT(2)
+#define IQS5XX_SWIPE_RIGHT BIT(3)
+#define IQS5XX_SWIPE_UP BIT(4)
+#define IQS5XX_SWIPE_DOWN BIT(5)
+
+// These 2 registers have the same bit map.
+// The first one configures the gestures,
+// the second one reports gesture events at runtime.
+#define IQS5XX_MULTI_FINGER_GESTURES_CONF 0x06B8
+#define IQS5XX_GESTURE_EVENTS_1 0x000E
+// Multi finger gesture identifiers.
+#define IQS5XX_TWO_FINGER_TAP BIT(0)
+#define IQS5XX_SCROLL BIT(1)
+#define IQS5XX_ZOOM BIT(2)
+
 struct iqs5xx_config {
     struct i2c_dt_spec i2c;
     struct gpio_dt_spec rdy_gpio;
@@ -91,7 +116,11 @@ struct iqs5xx_data {
     const struct device *dev;
     struct gpio_callback rdy_cb;
     struct k_work work;
+    struct k_work_delayable button_release_work;
+    // TODO: Pack flags into a bitfield to save space.
     bool initialized;
+    // Flag to indicate if the button was pressed in a previous cycle.
+    uint8_t buttons_pressed;
 };
 
 static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
@@ -130,10 +159,27 @@ static int iqs5xx_end_comm_window(const struct device *dev) {
     return i2c_write_dt(&config->i2c, buf, sizeof(buf));
 }
 
+static void iqs5xx_button_release_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, button_release_work);
+
+    // TODO: This loop should only deactivate one button.
+    // Log a warning when that is not the case.
+    for (int i = 0; i < 3; i++) {
+        LOG_INF("Releasing synthetic button");
+        if (data->buttons_pressed & BIT(i)) {
+            input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
+            // Turn off the bit.
+            // NOTE: This is a potential race.
+            data->buttons_pressed ^= BIT(i);
+        }
+    }
+}
+
 static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
-    uint8_t sys_info_0, sys_info_1, num_fingers;
+    uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
     int16_t rel_x, rel_y;
     int ret;
 
@@ -150,6 +196,18 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
+    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_0, &gesture_events_0);
+    if (ret < 0) {
+        LOG_ERR("Failed to read gesture events: %d", ret);
+        goto end_comm;
+    }
+
+    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_1, &gesture_events_1);
+    if (ret < 0) {
+        LOG_ERR("Failed to read gesture events 1: %d", ret);
+        goto end_comm;
+    }
+
     /* Handle reset indication */
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
         LOG_INF("Device reset detected");
@@ -158,7 +216,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
-    /* Check for trackpad movement */
+    // Handle movement and gestures.
+    //
+    // Each one of these branches needs to make send the last report it makes as
+    // sync to ensure that the input subsystem process things in order.
     if (sys_info_1 & IQS5XX_TP_MOVEMENT) {
         ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
         if (ret < 0) {
@@ -184,9 +245,29 @@ static void iqs5xx_work_handler(struct k_work *work) {
             LOG_DBG("Movement: fingers=%d, rel_x=%d, rel_y=%d", num_fingers, rel_x, rel_y);
 
             /* Send pointer movement event */
-            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
+            ret = input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
+            ret = input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
+    } else if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
+        // Cancel any pending release.
+        k_work_cancel_delayable(&data->button_release_work);
+
+        // Press the button immediately.
+        input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+        data->buttons_pressed |= BIT(0);
+
+        // Schedule release after 100ms.
+        k_work_schedule(&data->button_release_work, K_MSEC(100));
+    } else if (gesture_events_1 & IQS5XX_TWO_FINGER_TAP) {
+        // Cancel any pending release.
+        k_work_cancel_delayable(&data->button_release_work);
+
+        // Press the button immediately.
+        input_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
+        data->buttons_pressed |= BIT(1);
+
+        // Schedule release after 100ms.
+        k_work_schedule(&data->button_release_work, K_MSEC(100));
     }
 
 end_comm:
@@ -205,11 +286,41 @@ static int iqs5xx_setup_device(const struct device *dev) {
     int ret;
 
     /* Enable event mode and trackpad events */
-    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1, IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT);
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
+                            IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
     if (ret < 0) {
         LOG_ERR("Failed to configure event mode: %d", ret);
         return ret;
     }
+
+    ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, 10);
+    if (ret < 0) {
+        LOG_ERR("Failed to set bottom beta: %d", ret);
+        return ret;
+    }
+
+    /* Read the current value of bottom beta and log it */
+    uint8_t bottom_beta;
+    ret = iqs5xx_read_reg8(dev, IQS5XX_BOTTOM_BETA, &bottom_beta);
+    if (ret < 0) {
+        LOG_ERR("Failed to read bottom beta: %d", ret);
+        return ret;
+    }
+    LOG_INF("Current bottom beta: %d", bottom_beta);
+
+    ret = iqs5xx_write_reg8(dev, IQS5XX_STATIONARY_THRESH, 5);
+    if (ret < 0) {
+        LOG_ERR("Failed to set bottom stationary threshold: %d", ret);
+        return ret;
+    }
+
+    uint8_t stat_threshold;
+    ret = iqs5xx_read_reg8(dev, IQS5XX_STATIONARY_THRESH, &stat_threshold);
+    if (ret < 0) {
+        LOG_ERR("Failed to read bottom stat_threshold: %d", ret);
+        return ret;
+    }
+    LOG_INF("Current stat thresh: %d", stat_threshold);
 
     // Set filter settings with:
     // - IIR filter enabled
@@ -218,6 +329,24 @@ static int iqs5xx_setup_device(const struct device *dev) {
     // - ALP count filter enabled
     ret = iqs5xx_write_reg8(dev, IQS5XX_FILTER_SETTINGS,
                             IQS5XX_IIR_FILTER | IQS5XX_MAV_FILTER | IQS5XX_ALP_COUNT_FILTER);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure filter settings: %d", ret);
+        return ret;
+    }
+
+    // Configure single finger gestures:
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SINGLE_FINGER_GESTURES_CONF, IQS5XX_SINGLE_TAP);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure single finger gestures: %d", ret);
+        return ret;
+    }
+
+    // Configure multi finger gestures:
+    ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF, IQS5XX_TWO_FINGER_TAP);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure multi finger gestures: %d", ret);
+        return ret;
+    }
 
     /* Configure system settings */
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0, IQS5XX_SETUP_COMPLETE | IQS5XX_WDT);
@@ -248,6 +377,7 @@ static int iqs5xx_init(const struct device *dev) {
 
     data->dev = dev;
     k_work_init(&data->work, iqs5xx_work_handler);
+    k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
 
     /* Configure reset GPIO if available */
     if (config->reset_gpio.port) {
