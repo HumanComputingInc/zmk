@@ -97,6 +97,21 @@ LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 #define IQS5XX_SWIPE_UP BIT(4)
 #define IQS5XX_SWIPE_DOWN BIT(5)
 
+// Time in ms, 2 registers wide.
+// Hold time + tap time is used as
+// a threshold for the press and
+// hold gesture.
+#define IQS5XX_HOLD_TIME 0x06BD
+// TODO: Make hold time configurable with KConfig.
+
+// Mouse button helpers.
+#define LEFT_BUTTON_BIT BIT(0)
+#define RIGHT_BUTTON_BIT BIT(1)
+#define MIDDLE_BUTTON_BIT BIT(2)
+#define LEFT_BUTTON_CODE INPUT_BTN_0
+#define RIGHT_BUTTON_CODE INPUT_BTN_0 + 1
+#define MIDDLE_BUTTON_CODE INPUT_BTN_0 + 2
+
 // These 2 registers have the same bit map.
 // The first one configures the gestures,
 // the second one reports gesture events at runtime.
@@ -122,6 +137,7 @@ struct iqs5xx_data {
     bool initialized;
     // Flag to indicate if the button was pressed in a previous cycle.
     uint8_t buttons_pressed;
+    bool active_hold;
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
@@ -140,6 +156,13 @@ static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *v
 
     *val = (buf[0] << 8) | buf[1];
     return 0;
+}
+
+static int iqs5xx_write_reg16(const struct device *dev, uint16_t reg, uint16_t val) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t buf[4] = {reg >> 8, reg & 0xFF, val >> 8, val & 0xFF};
+
+    return i2c_write_dt(&config->i2c, buf, sizeof(buf));
 }
 
 static int iqs5xx_read_reg8(const struct device *dev, uint16_t reg, uint8_t *val) {
@@ -237,6 +260,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
         button_code = INPUT_BTN_1;
     }
 
+    bool hold_became_active = (gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && !data->active_hold;
+    bool hold_released = !(gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && data->active_hold;
+
     int16_t rel_x, rel_y;
     if (tp_movement || scroll) {
         ret = iqs5xx_read_reg16(dev, IQS5XX_REL_X, (uint16_t *)&rel_x);
@@ -256,7 +282,15 @@ static void iqs5xx_work_handler(struct k_work *work) {
     //
     // Each one of these branches needs to make send the last report it makes as
     // sync to ensure that the input subsystem process things in order.
-    if (button_pressed) {
+    if (hold_became_active) {
+        LOG_INF("Hold became active");
+        input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
+        data->active_hold = true;
+    } else if (hold_released) {
+        LOG_INF("Hold became inactive");
+        input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
+        data->active_hold = false;
+    } else if (button_pressed) {
         // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
 
@@ -368,11 +402,26 @@ static int iqs5xx_setup_device(const struct device *dev) {
     }
 
     // Configure single finger gestures:
-    ret = iqs5xx_write_reg8(dev, IQS5XX_SINGLE_FINGER_GESTURES_CONF, IQS5XX_SINGLE_TAP);
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SINGLE_FINGER_GESTURES_CONF,
+                            IQS5XX_SINGLE_TAP | IQS5XX_PRESS_AND_HOLD);
     if (ret < 0) {
         LOG_ERR("Failed to configure single finger gestures: %d", ret);
         return ret;
     }
+
+    // Configure the hold time for the press and hold gesture:
+    ret = iqs5xx_write_reg16(dev, IQS5XX_HOLD_TIME, 250);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure the hold time: %d", ret);
+        return ret;
+    }
+    uint16_t hold_time;
+    ret = iqs5xx_read_reg16(dev, IQS5XX_HOLD_TIME, &hold_time);
+    if (ret < 0) {
+        LOG_ERR("Failed to read back the hold time: %d", ret);
+        return ret;
+    }
+    LOG_INF("Configured hold time: %d", hold_time);
 
     // Configure multi finger gestures:
     ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF,
