@@ -175,7 +175,7 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
             input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
             // Turn off the bit.
             // NOTE: This is a potential race.
-            data->buttons_pressed ^= BIT(i);
+            data->buttons_pressed &= ~BIT(i);
         }
     }
 }
