@@ -155,8 +155,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
     // Handle movement and gestures.
     //
-    // Each one of these branches needs to make send the last report it makes as
-    // sync to ensure that the input subsystem process things in order.
+    // Each one of these branches needs to send the last report it makes as
+    // sync to ensure that the input subsystem processes things in order.
     if (hold_became_active) {
         LOG_INF("Hold became active");
         input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
