@@ -19,6 +19,8 @@
       {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
+            ninja
+            cmake
             python3Full
             python313Packages.west
             # From requirements-base.txt
