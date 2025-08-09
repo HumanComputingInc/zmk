@@ -84,7 +84,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
     int ret;
 
-    /* Read system info registers */
+    // Read system info registers.
     ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_0, &sys_info_0);
     if (ret < 0) {
         LOG_ERR("Failed to read system info 0: %d", ret);
@@ -109,10 +109,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
-    /* Handle reset indication */
+    // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
         LOG_INF("Device reset detected");
-        /* Acknowledge reset */
+        // Acknowledge reset.
         iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
         goto end_comm;
     }
@@ -202,18 +202,18 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
 
-        /* Report movement if there's actually movement */
+        // Report movement if there's actually movement.
         if (rel_x != 0 || rel_y != 0) {
             LOG_DBG("Movement: fingers=%d, rel_x=%d, rel_y=%d", num_fingers, rel_x, rel_y);
 
-            /* Send pointer movement event */
+            // Send pointer movement event.
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
     }
 
 end_comm:
-    /* End communication window */
+    // End communication window.
     iqs5xx_end_comm_window(dev);
 }
 
@@ -228,7 +228,7 @@ static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
 
-    /* Enable event mode and trackpad events */
+    // Enable event mode and trackpad events.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
                             IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
     if (ret < 0) {
@@ -242,28 +242,11 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    /* Read the current value of bottom beta and log it */
-    uint8_t bottom_beta;
-    ret = iqs5xx_read_reg8(dev, IQS5XX_BOTTOM_BETA, &bottom_beta);
-    if (ret < 0) {
-        LOG_ERR("Failed to read bottom beta: %d", ret);
-        return ret;
-    }
-    LOG_INF("Current bottom beta: %d", bottom_beta);
-
     ret = iqs5xx_write_reg8(dev, IQS5XX_STATIONARY_THRESH, config->stationary_threshold);
     if (ret < 0) {
         LOG_ERR("Failed to set bottom stationary threshold: %d", ret);
         return ret;
     }
-
-    uint8_t stat_threshold;
-    ret = iqs5xx_read_reg8(dev, IQS5XX_STATIONARY_THRESH, &stat_threshold);
-    if (ret < 0) {
-        LOG_ERR("Failed to read bottom stat_threshold: %d", ret);
-        return ret;
-    }
-    LOG_INF("Current stat thresh: %d", stat_threshold);
 
     // TODO: Expose these through dts bindings.
     // Set filter settings with:
@@ -294,13 +277,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
         LOG_ERR("Failed to configure the hold time: %d", ret);
         return ret;
     }
-    uint16_t hold_time;
-    ret = iqs5xx_read_reg16(dev, IQS5XX_HOLD_TIME, &hold_time);
-    if (ret < 0) {
-        LOG_ERR("Failed to read back the hold time: %d", ret);
-        return ret;
-    }
-    LOG_INF("Configured hold time: %d", hold_time);
 
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
@@ -354,7 +330,7 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
 
-    /* Configure reset GPIO if available */
+    // Configure reset GPIO if available.
     if (config->reset_gpio.port) {
         if (!gpio_is_ready_dt(&config->reset_gpio)) {
             LOG_ERR("Reset GPIO not ready");
@@ -367,14 +343,14 @@ static int iqs5xx_init(const struct device *dev) {
             return ret;
         }
 
-        /* Reset the device */
+        // Reset the device.
         gpio_pin_set_dt(&config->reset_gpio, 1);
         k_msleep(1);
         gpio_pin_set_dt(&config->reset_gpio, 0);
         k_msleep(10);
     }
 
-    /* Configure RDY GPIO */
+    // Configure RDY GPIO.
     if (!gpio_is_ready_dt(&config->rdy_gpio)) {
         LOG_ERR("RDY GPIO not ready");
         return -ENODEV;
@@ -399,10 +375,10 @@ static int iqs5xx_init(const struct device *dev) {
         return ret;
     }
 
-    /* Wait for device to be ready */
+    // Wait for device to be ready.
     k_msleep(100);
 
-    /* Setup device configuration */
+    // Setup device configuration.
     ret = iqs5xx_setup_device(dev);
     if (ret < 0) {
         LOG_ERR("Failed to setup device: %d", ret);

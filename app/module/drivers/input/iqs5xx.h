@@ -1,11 +1,11 @@
 #include <zephyr/device.h>
 
 #define IQS5XX_NUM_FINGERS 0x0011
-#define IQS5XX_REL_X 0x0012          /* 2 bytes */
-#define IQS5XX_REL_Y 0x0014          /* 2 bytes */
-#define IQS5XX_ABS_X 0x0016          /* 2 bytes */
-#define IQS5XX_ABS_Y 0x0018          /* 2 bytes */
-#define IQS5XX_TOUCH_STRENGTH 0x001A /* 2 bytes */
+#define IQS5XX_REL_X 0x0012          // 2 bytes.
+#define IQS5XX_REL_Y 0x0014          // 2 bytes.
+#define IQS5XX_ABS_X 0x0016          // 2 bytes.
+#define IQS5XX_ABS_Y 0x0018          // 2 bytes.
+#define IQS5XX_TOUCH_STRENGTH 0x001A // 2 bytes.
 #define IQS5XX_TOUCH_AREA 0x001C
 
 #define IQS5XX_BOTTOM_BETA 0x0637
@@ -14,14 +14,14 @@
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
 #define IQS5XX_SYSTEM_CONTROL_0 0x0431
-/* System Control 0 bits */
+// System Control 0 bits.
 #define IQS5XX_ACK_RESET BIT(7)
 #define IQS5XX_AUTO_ATI BIT(5)
 #define IQS5XX_ALP_RESEED BIT(4)
 #define IQS5XX_RESEED BIT(3)
 
 #define IQS5XX_SYSTEM_CONFIG_0 0x058E
-/* System Config 0 bits */
+// System Config 0 bits.
 #define IQS5XX_MANUAL_CONTROL BIT(7)
 #define IQS5XX_SETUP_COMPLETE BIT(6)
 #define IQS5XX_WDT BIT(5)
@@ -32,7 +32,7 @@
 #define IQS5XX_SW_INPUT BIT(0)
 
 #define IQS5XX_SYSTEM_CONFIG_1 0x058F
-/* System Config 1 bits */
+// System Config 1 bits.
 #define IQS5XX_EVENT_MODE BIT(0)
 #define IQS5XX_GESTURE_EVENT BIT(1)
 #define IQS5XX_TP_EVENT BIT(2)
@@ -51,7 +51,7 @@
 #define IQS5XX_ALP_COUNT_FILTER BIT(3)
 
 #define IQS5XX_SYSTEM_INFO_0 0x000F
-/* System Info 0 bits */
+// System Info 0 bits.
 #define IQS5XX_SHOW_RESET BIT(7)
 #define IQS5XX_ALP_REATI_OCCURRED BIT(6)
 #define IQS5XX_ALP_ATI_ERROR BIT(5)
@@ -59,7 +59,7 @@
 #define IQS5XX_ATI_ERROR BIT(3)
 
 #define IQS5XX_SYSTEM_INFO_1 0x0010
-/* System Info 1 bits */
+// System Info 1 bits.
 #define IQS5XX_SWITCH_STATE BIT(5)
 #define IQS5XX_SNAP_TOGGLE BIT(4)
 #define IQS5XX_RR_MISSED BIT(3)
