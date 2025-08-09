@@ -38,6 +38,17 @@
         compatible = "azoteq,iqs5xx";
         reg = <0x74>;
 
+        one-finger-tap;
+        press-and-hold;
+        press-and-hold-time = <250>;
+        two-finger-tap;
+        scroll;
+
+        bottom-beta = <5>;
+        stationary-threshold = <5>;
+
+        switch-xy;
+
         reset-gpios = <&arduino_header 14 GPIO_ACTIVE_LOW>; /* P1.10 */
         rdy-gpios = <&arduino_header 15 GPIO_ACTIVE_HIGH>; /* P1.11 */
     };
