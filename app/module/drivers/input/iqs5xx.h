@@ -120,15 +120,19 @@ struct iqs5xx_config {
     bool one_finger_tap;
     bool press_and_hold;
     bool two_finger_tap;
-    bool scroll;
     uint16_t press_and_hold_time;
+
+    // Scrolling configuration.
+    bool scroll;
+    bool natural_scroll_x;
+    bool natural_scroll_y;
 
     // Axes configuration.
     bool switch_xy;
     bool flip_x;
     bool flip_y;
 
-    // Movement configuration.
+    // Sensitivity. configuration.
     uint8_t bottom_beta;
     uint8_t stationary_threshold;
 };

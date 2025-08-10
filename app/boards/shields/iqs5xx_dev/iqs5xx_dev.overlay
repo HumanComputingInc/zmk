@@ -42,7 +42,10 @@
         press-and-hold;
         press-and-hold-time = <250>;
         two-finger-tap;
+
         scroll;
+        natural-scroll-y;
+        natural-scroll-x;
 
         bottom-beta = <5>;
         stationary-threshold = <5>;
