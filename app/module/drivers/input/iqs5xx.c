@@ -81,6 +81,7 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
 static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
+    const struct iqs5xx_config *config = dev->config;
     uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
     int ret;
 
@@ -176,22 +177,34 @@ static void iqs5xx_work_handler(struct k_work *work) {
         // Schedule release after 100ms.
         k_work_schedule(&data->button_release_work, K_MSEC(100));
     } else if (scroll) {
+        // TODO: Expose this divisor.
         int16_t scroll_div = 32;
+
+        // Only one scrolling direction is valid at a time.
+        // End the communication right after reporting the movement.
         if (rel_x != 0) {
-            input_report_rel(dev, INPUT_REL_HWHEEL, rel_x, true, K_FOREVER);
+            // By default the x axis is already "natural".
+            if (!config->natural_scroll_x) {
+                rel_x *= -1;
+            }
+            data->scroll_x_acc += rel_x;
+            if (abs(data->scroll_x_acc) >= scroll_div) {
+                input_report_rel(dev, INPUT_REL_HWHEEL, data->scroll_x_acc / scroll_div, true,
+                                K_FOREVER);
+                data->scroll_x_acc %= scroll_div;
+            }
             goto end_comm;
         }
         if (rel_y != 0) {
-            // Invert scroll direcion.
-            rel_y *= -1;
-            // input_report_rel(dev, INPUT_REL_WHEEL, rel_y, true, K_FOREVER);
+            if (config->natural_scroll_y) {
+                rel_y *= -1;
+            }
             data->scroll_y_acc += rel_y;
             if (abs(data->scroll_y_acc) >= scroll_div) {
                 input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true,
                                  K_FOREVER);
                 data->scroll_y_acc %= scroll_div;
             }
-            LOG_INF("New scroll y accumulator: %d", data->scroll_y_acc);
 
             goto end_comm;
         }
@@ -202,11 +215,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
 
-        // Report movement if there's actually movement.
         if (rel_x != 0 || rel_y != 0) {
-            LOG_DBG("Movement: fingers=%d, rel_x=%d, rel_y=%d", num_fingers, rel_x, rel_y);
-
-            // Send pointer movement event.
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
@@ -309,7 +318,7 @@ static int iqs5xx_setup_device(const struct device *dev) {
     // End communication window.
     ret = iqs5xx_end_comm_window(dev);
     if (ret < 0) {
-        LOG_ERR("Failed to end comm window: %d", ret);
+        LOG_ERR("Failed to end comm window during initialization: %d", ret);
         return ret;
     }
 
@@ -402,6 +411,8 @@ static int iqs5xx_init(const struct device *dev) {
         .press_and_hold = DT_INST_PROP(n, press_and_hold),                                         \
         .two_finger_tap = DT_INST_PROP(n, two_finger_tap),                                         \
         .scroll = DT_INST_PROP(n, scroll),                                                         \
+        .natural_scroll_x = DT_INST_PROP(n, natural_scroll_x),                                     \
+        .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \
